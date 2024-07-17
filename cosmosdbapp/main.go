@@ -12,21 +12,19 @@ import (
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
-
-	"go.mongodb.org/mongo-driver/mongo/options"
 	moptions "go.mongodb.org/mongo-driver/mongo/options"
 )
 
 const (
 	uri                  = ""
-	serverConnectTimeout = 20 * time.Second
-	pingTimeout          = 20 * time.Second
-	batchSize            = 100
+	serverConnectTimeout = 30 * time.Second
+	pingTimeout          = 30 * time.Second
+	batchSize            = 7
 )
 
 type Progress struct {
 	ChangeStreamEvents atomic.Uint64
-	numInserts         uint64
+	numInserts         atomic.Uint64
 }
 
 func main() {
@@ -59,16 +57,16 @@ func main() {
 			{Collection: "col2", Database: "db5"},
 			{Collection: "col1", Database: "db6"},
 			{Collection: "col2", Database: "db6"},
-			{Collection: "col1", Database: "db7"}, */
+			{Collection: "col1", Database: "db7"},*/
 	}
 
 	// Progress struct to compare the speed of inserts to change stream events
 
-	progress := Progress{
-		numInserts: 0,
-	}
+	progress := Progress{}
 	progress.ChangeStreamEvents.Store(0)
+	progress.numInserts.Store(0)
 
+	//setUpNamespaces(client, locations)
 	//run concurrent change streams and inserts generator, print the progress every 5 seconds
 	var wg sync.WaitGroup
 	wg.Add(3)
@@ -90,21 +88,21 @@ func main() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		startTime := time.Now()
-		inserts := progress.numInserts
+		inserts := progress.numInserts.Load()
 		changeEvents := progress.ChangeStreamEvents.Load()
 		for {
 			select {
 			case <-ticker.C:
 				//inserts per second
 				elapsed := time.Since(startTime).Seconds()
-				insertsDelta := progress.numInserts - inserts
+				insertsDelta := progress.numInserts.Load() - inserts
 				insertsPerSecond := math.Floor(float64(insertsDelta) / elapsed)
-				inserts = progress.numInserts
+				inserts = progress.numInserts.Load()
 				//change stream events per second
 				changeEventsDelta := progress.ChangeStreamEvents.Load() - changeEvents
 				changeEventsPerSecond := math.Floor(float64(changeEventsDelta) / elapsed)
 				changeEvents = progress.ChangeStreamEvents.Load()
-				fmt.Printf("Progress Check: Change Stream Events - %d, Inserts - %d, Inserts Per Second - %f, Change Events Per Second - %f \n", progress.ChangeStreamEvents.Load(), progress.numInserts, insertsPerSecond, changeEventsPerSecond)
+				fmt.Printf("Progress Check: Change Stream Events - %d, Inserts - %d, Inserts Per Second - %f, Change Events Per Second - %f \n", progress.ChangeStreamEvents.Load(), progress.numInserts.Load(), insertsPerSecond, changeEventsPerSecond)
 				startTime = time.Now()
 			}
 		}
@@ -139,7 +137,7 @@ func createChangeStream(namespace Location, client *mongo.Client, ctx context.Co
 			{Key: "operationType", Value: bson.D{{Key: "$in", Value: bson.A{"insert", "update", "replace"}}}}}}},
 		bson.D{{Key: "$project", Value: bson.D{{Key: "_id", Value: 1}, {Key: "fullDocument", Value: 1}, {Key: "ns", Value: 1}, {Key: "documentKey", Value: 1}}}},
 	}
-	opts := options.ChangeStream().SetFullDocument(options.UpdateLookup)
+	opts := moptions.ChangeStream().SetFullDocument(moptions.UpdateLookup)
 	changeStream, err := collection.Watch(ctx, pipeline, opts)
 	if err != nil {
 		fmt.Printf("Error opening change stream: %v\n", err)
@@ -191,22 +189,29 @@ func setUpNamespaces(client *mongo.Client, locations []Location) {
 
 // Inserts document into each collection
 func insertsGenerator(namespaces []Location, client *mongo.Client, progress *Progress) {
+	var wg sync.WaitGroup
 	for _, namespace := range namespaces {
-		db := namespace.Database
-		col := namespace.Collection
-		collection := client.Database(db).Collection(col)
-		ctxInsert, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		batch := make([]interface{}, batchSize)
-		for i := 0; i < batchSize; i++ {
-			document := bson.D{{Key: "randomNumber", Value: rand.Int()}}
-			batch[i] = document
-		}
-		_, err := collection.InsertMany(ctxInsert, batch)
-		if err != nil {
-			fmt.Printf("Error inserting document into %v: %v\n", collection, err)
-		}
-		progress.numInserts += batchSize
+		wg.Add(1)
+		go func(namespace Location) {
+			defer wg.Done()
+
+			db := namespace.Database
+			col := namespace.Collection
+			collection := client.Database(db).Collection(col)
+			ctxInsert, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			batch := make([]interface{}, batchSize)
+			for i := 0; i < batchSize; i++ {
+				document := bson.D{{Key: "randomNumber", Value: rand.Int()}}
+				batch[i] = document
+			}
+			_, err := collection.InsertMany(ctxInsert, batch)
+			if err != nil {
+				fmt.Printf("Error inserting document into %v: %v\n", collection, err)
+			}
+			progress.numInserts.Add(batchSize)
+		}(namespace)
 	}
+	wg.Wait()
 
 }
