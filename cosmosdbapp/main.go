@@ -18,10 +18,10 @@ import (
 )
 
 const (
-	uri                  = "connection string"
+	uri                  = ""
 	serverConnectTimeout = 20 * time.Second
 	pingTimeout          = 20 * time.Second
-	numCollections       = 10
+	batchSize            = 100
 )
 
 type Progress struct {
@@ -54,11 +54,12 @@ func main() {
 		{Collection: "col2", Database: "db3"},
 		{Collection: "col1", Database: "db4"},
 		{Collection: "col2", Database: "db4"},
-		{Collection: "col1", Database: "db5"},
-		{Collection: "col2", Database: "db5"},
-		{Collection: "col1", Database: "db6"},
-		{Collection: "col2", Database: "db6"},
-		{Collection: "col1", Database: "db7"},
+		/*
+			{Collection: "col1", Database: "db5"},
+			{Collection: "col2", Database: "db5"},
+			{Collection: "col1", Database: "db6"},
+			{Collection: "col2", Database: "db6"},
+			{Collection: "col1", Database: "db7"}, */
 	}
 
 	// Progress struct to compare the speed of inserts to change stream events
@@ -173,6 +174,21 @@ func concurrentChangeStreams(namespaces []Location, client *mongo.Client, progre
 	wg.Wait()
 }
 
+func setUpNamespaces(client *mongo.Client, locations []Location) {
+	for _, namespace := range locations {
+		db := namespace.Database
+		col := namespace.Collection
+		collection := client.Database(db).Collection(col)
+		ctxInsert, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := collection.InsertOne(ctxInsert, bson.D{{Key: "randomNumber", Value: rand.Int()}})
+		if err != nil {
+			fmt.Printf("Error inserting document into %v: %v\n", collection, err)
+		}
+	}
+	fmt.Printf("Set up each namespace \n")
+}
+
 // Inserts document into each collection
 func insertsGenerator(namespaces []Location, client *mongo.Client, progress *Progress) {
 	for _, namespace := range namespaces {
@@ -181,12 +197,16 @@ func insertsGenerator(namespaces []Location, client *mongo.Client, progress *Pro
 		collection := client.Database(db).Collection(col)
 		ctxInsert, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		document := bson.D{{Key: "randomNumber", Value: rand.Int()}}
-		_, err := collection.InsertOne(ctxInsert, document)
+		batch := make([]interface{}, batchSize)
+		for i := 0; i < batchSize; i++ {
+			document := bson.D{{Key: "randomNumber", Value: rand.Int()}}
+			batch[i] = document
+		}
+		_, err := collection.InsertMany(ctxInsert, batch)
 		if err != nil {
 			fmt.Printf("Error inserting document into %v: %v\n", collection, err)
 		}
-		progress.numInserts++
+		progress.numInserts += batchSize
 	}
 
 }
